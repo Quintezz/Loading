@@ -1,3 +1,13 @@
+/* STEP 2 — OverlapDays voor INCR_DATE
+   - Kolom OverlapDays toevoegen aan dwh.LoadConfig (default 0)
+   - INCR-proc aanpassen: filteren met DATEADD(DAY,-OverlapDays,@wm)
+   - Testscript voor overlap laden
+*/
+
+
+------------------------------------------------------------
+-- 2) Loader-proc INCR_DATE met OverlapDays
+------------------------------------------------------------
 IF OBJECT_ID(N'[dwh].[usp_Load_GenericIncrDate]', N'P') IS NOT NULL
   DROP PROCEDURE [dwh].[usp_Load_GenericIncrDate];
 GO
@@ -13,10 +23,10 @@ BEGIN
 
   BEGIN TRY
     DECLARE @SourceSchema SYSNAME, @SourceObject SYSNAME, @TargetSchema SYSNAME, @TargetTable SYSNAME,
-            @KeyColumns NVARCHAR(MAX), @UpdateColumns NVARCHAR(MAX), @WatermarkColumn SYSNAME;
+            @KeyColumns NVARCHAR(MAX), @UpdateColumns NVARCHAR(MAX), @WatermarkColumn SYSNAME, @OverlapDays INT;
 
     SELECT @SourceSchema=SourceSchema, @SourceObject=SourceObject, @TargetSchema=TargetSchema, @TargetTable=TargetTable,
-           @KeyColumns=KeyColumns, @UpdateColumns=UpdateColumns, @WatermarkColumn=WatermarkColumn
+           @KeyColumns=KeyColumns, @UpdateColumns=UpdateColumns, @WatermarkColumn=WatermarkColumn, @OverlapDays=OverlapDays
     FROM dwh.LoadConfig
     WHERE ProcessName=@ProcessName;
 
@@ -25,6 +35,8 @@ BEGIN
       EXEC dwh.usp_JobRun_End @JobRunId=@JobRunId, @Status=N'Failed', @ErrorMessage=N'ProcessName niet gevonden in LoadConfig';
       RETURN;
     END
+
+    SET @OverlapDays = ISNULL(@OverlapDays,0);
 
     DECLARE @wm DATETIME2(3), @vb BIGINT, @vs NVARCHAR(128);
     EXEC dwh.usp_Watermark_Get @ProcessName, @wm OUTPUT, @vb OUTPUT, @vs OUTPUT;
@@ -47,13 +59,15 @@ BEGIN
     IF @WatermarkColumn IS NOT NULL
       INSERT INTO @ins(col) SELECT @WatermarkColumn WHERE NOT EXISTS(SELECT 1 FROM @ins i WHERE i.col=@WatermarkColumn);
 
-    -- ON, SET, DIFF
+    -- predicates
     DECLARE @on NVARCHAR(MAX);
-    SELECT @on=STUFF((SELECT ' AND T.'+QUOTENAME(col)+' = S.'+QUOTENAME(col) FROM @keys FOR XML PATH(''),TYPE).value('.','nvarchar(max)'),1,5,'');
+    SELECT @on=STUFF((SELECT ' AND T.'+QUOTENAME(col)+' = S.'+QUOTENAME(col)
+                      FROM @keys FOR XML PATH(''),TYPE).value('.','nvarchar(max)'),1,5,'');
 
     DECLARE @set NVARCHAR(MAX)=NULL;
     IF EXISTS(SELECT 1 FROM @upd)
-      SELECT @set=STUFF((SELECT ', T.'+QUOTENAME(col)+' = S.'+QUOTENAME(col) FROM @upd FOR XML PATH(''),TYPE).value('.','nvarchar(max)'),1,2,'');
+      SELECT @set=STUFF((SELECT ', T.'+QUOTENAME(col)+' = S.'+QUOTENAME(col)
+                         FROM @upd FOR XML PATH(''),TYPE).value('.','nvarchar(max)'),1,2,'');
 
     DECLARE @diff NVARCHAR(MAX)=NULL;
     IF EXISTS(SELECT 1 FROM @upd)
@@ -65,9 +79,10 @@ BEGIN
     SELECT @cols_ins=STUFF((SELECT ','+QUOTENAME(col) FROM @ins FOR XML PATH(''),TYPE).value('.','nvarchar(max)'),1,1,''),
            @cols_vals=STUFF((SELECT ',S.'+QUOTENAME(col) FROM @ins FOR XML PATH(''),TYPE).value('.','nvarchar(max)'),1,1,'');
 
-    -- dynamisch: materialiseer filter in #F
+    -- dynamisch: materialiseer filter met overlap in #F
     DECLARE @sql NVARCHAR(MAX)=N'
-      SELECT * INTO #F FROM '+@src+N' WHERE '+QUOTENAME(@WatermarkColumn)+N' > @wm;
+      SELECT * INTO #F FROM '+@src+N'
+      WHERE '+QUOTENAME(@WatermarkColumn)+N' > DATEADD(DAY, -@ov, @wm);
 
       DECLARE @chg TABLE([Act] nvarchar(10) NOT NULL);
 
@@ -86,7 +101,7 @@ BEGIN
       FROM @chg AS a;';
 
     DECLARE @t TABLE(RowsInserted BIGINT, RowsUpdated BIGINT, RowsRead BIGINT, NewWM DATETIME2(3));
-    INSERT INTO @t EXEC sp_executesql @sql, N'@wm datetime2', @wm=@wm;
+    INSERT INTO @t EXEC sp_executesql @sql, N'@wm datetime2, @ov int', @wm=@wm, @ov=@OverlapDays;
 
     DECLARE @ri BIGINT,@ru BIGINT,@rr BIGINT,@newwm DATETIME2(3);
     SELECT @ri=RowsInserted,@ru=RowsUpdated,@rr=RowsRead,@newwm=NewWM FROM @t;
