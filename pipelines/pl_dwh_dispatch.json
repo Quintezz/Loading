@@ -1,0 +1,21 @@
+{
+  "name": "pl_dwh_dispatch",
+  "properties": {
+    "description": "Roep dwh.usp_Dispatch_Load aan voor een omgeving",
+    "parameters": {
+      "Env": { "type": "String", "defaultValue": "TST" }
+    },
+    "activities": [
+      {
+        "name": "Dispatch_Loads",
+        "type": "SqlServerStoredProcedure",
+        "typeProperties": {
+          "storedProcedureName": "dwh.usp_Dispatch_Load",
+          "storedProcedureParameters": {
+            "Env": { "value": "@{pipeline().parameters.Env}", "type": "Expression" }
+          }
+        }
+      }
+    ]
+  }
+}
